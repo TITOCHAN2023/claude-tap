@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -75,9 +77,12 @@ def test_sync_dashboard_health_uses_proxyless_opener(monkeypatch: pytest.MonkeyP
             return FakeResponse()
 
     db_path = tmp_path / "health.sqlite3"
-    json_bytes = f'{{"ok":true,"db_path":"{db_path}"}}'.encode()
     calls: list[tuple[str, float]] = []
     monkeypatch.setenv("CLOUDTAP_DB", str(db_path))
+    # Build the payload with json.dumps so Windows paths (backslashes) are
+    # escaped correctly, and use the resolved path the product code compares
+    # against so the health check matches on every platform.
+    json_bytes = json.dumps({"ok": True, "db_path": str(resolve_db_path())}).encode()
     monkeypatch.setattr("claude_tap.shared_dashboard._LOCAL_DASHBOARD_OPENER", FakeOpener())
 
     assert _sync_dashboard_healthy_for_current_db("127.0.0.1", 19527) is True
@@ -97,6 +102,10 @@ def test_dashboard_spawn_lock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
         pass
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX spawn path uses start_new_session; Windows is covered by the no-console test",
+)
 def test_spawn_dashboard_subprocess(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     spawned_args: list[tuple[list[str], dict[str, object]]] = []
 

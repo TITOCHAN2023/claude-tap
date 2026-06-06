@@ -208,3 +208,125 @@ def test_start_background_update_hides_windows_console(monkeypatch) -> None:
 def test_start_background_update_returns_none_when_uv_missing(monkeypatch) -> None:
     monkeypatch.setattr("claude_tap.cli.shutil.which", lambda _: None)
     assert _start_background_update("uv") is None
+
+
+def test_install_interrupt_handlers_uses_loop_when_available() -> None:
+    from claude_tap.cli_clients import _install_interrupt_handlers
+
+    added: list[object] = []
+    removed: list[object] = []
+
+    class FakeLoop:
+        def add_signal_handler(self, sig, _handler):
+            added.append(sig)
+
+        def remove_signal_handler(self, sig):
+            removed.append(sig)
+
+    restore = _install_interrupt_handlers(FakeLoop(), lambda: None, lambda: None, 99)
+    assert added == [signal.SIGINT, 99]
+    restore()
+    assert removed == [signal.SIGINT, 99]
+
+
+def test_install_interrupt_handlers_falls_back_to_signal_signal(monkeypatch) -> None:
+    """When the loop lacks add_signal_handler (Windows Proactor), SIGINT is
+    installed via signal.signal and restored afterward."""
+    from claude_tap import cli_clients
+
+    class FakeLoop:
+        def add_signal_handler(self, *_a, **_k):
+            raise NotImplementedError
+
+        def remove_signal_handler(self, *_a, **_k):  # pragma: no cover - must not run
+            raise AssertionError("loop removal must not run on the fallback path")
+
+    installed: dict[str, object] = {}
+
+    def fake_signal(sig, handler):
+        installed["sig"] = sig
+        installed["handler"] = handler
+        return "PREVIOUS"
+
+    monkeypatch.setattr(cli_clients.signal, "signal", fake_signal)
+
+    sigint_calls: list[str] = []
+    restore = cli_clients._install_interrupt_handlers(
+        FakeLoop(), lambda: sigint_calls.append("int"), lambda: None, None
+    )
+    assert installed["sig"] == signal.SIGINT
+    # The installed OS handler must delegate to on_sigint.
+    installed["handler"](signal.SIGINT, None)
+    assert sigint_calls == ["int"]
+    # Restoring puts the previously-saved handler back.
+    restore()
+    assert installed["handler"] == "PREVIOUS"
+
+
+def test_default_data_dir_posix_is_unchanged(monkeypatch) -> None:
+    from claude_tap import trace_store
+
+    monkeypatch.setattr(trace_store.sys, "platform", "linux")
+    assert trace_store._default_data_dir() == Path.home() / ".local" / "share" / "claude-tap"
+
+
+def test_default_data_dir_windows_prefers_localappdata(monkeypatch, tmp_path: Path) -> None:
+    from claude_tap import trace_store
+
+    fake_home = tmp_path / "home"
+    local = tmp_path / "AppData" / "Local"
+    monkeypatch.setattr(trace_store.sys, "platform", "win32")
+    monkeypatch.setattr(trace_store.Path, "home", lambda: fake_home)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+
+    assert trace_store._default_data_dir() == local / "claude-tap"
+
+
+def test_default_data_dir_windows_keeps_legacy_when_db_exists(monkeypatch, tmp_path: Path) -> None:
+    from claude_tap import trace_store
+
+    fake_home = tmp_path / "home"
+    legacy = fake_home / ".local" / "share" / "claude-tap"
+    legacy.mkdir(parents=True)
+    (legacy / trace_store.DB_FILENAME).write_bytes(b"")
+    monkeypatch.setattr(trace_store.sys, "platform", "win32")
+    monkeypatch.setattr(trace_store.Path, "home", lambda: fake_home)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+
+    assert trace_store._default_data_dir() == legacy
+
+
+def test_restrict_key_file_uses_icacls_on_windows(monkeypatch, tmp_path: Path) -> None:
+    from claude_tap import certs
+
+    key = tmp_path / "ca-key.pem"
+    key.write_bytes(b"x")
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(certs.sys, "platform", "win32")
+    monkeypatch.setenv("USERNAME", "tester")
+    monkeypatch.setattr(certs.subprocess, "run", fake_run)
+
+    certs._restrict_key_file(key)
+    assert captured["cmd"] == ["icacls", str(key), "/inheritance:r", "/grant:r", "tester:F"]
+
+
+def test_restrict_key_file_uses_chmod_on_posix(monkeypatch, tmp_path: Path) -> None:
+    from claude_tap import certs
+
+    key = tmp_path / "ca-key.pem"
+    key.write_bytes(b"x")
+    modes: list[int] = []
+    ran: list[bool] = []
+
+    monkeypatch.setattr(certs.sys, "platform", "linux")
+    monkeypatch.setattr(certs.subprocess, "run", lambda *a, **k: ran.append(True))
+    monkeypatch.setattr(Path, "chmod", lambda self, mode: modes.append(mode))
+
+    certs._restrict_key_file(key)
+    assert modes == [0o600]
+    assert ran == []

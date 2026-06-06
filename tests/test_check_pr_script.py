@@ -5,7 +5,14 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+# check_pr.sh and the gh/uv stubs are POSIX shell scripts; they cannot be
+# executed directly on Windows, which has no /bin/sh.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="check_pr.sh requires a POSIX shell")
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "check_pr.sh"
 
