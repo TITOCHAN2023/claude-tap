@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,25 @@ _store: TraceStore | None = None
 _store_lock = threading.Lock()
 
 
+def _default_data_dir() -> Path:
+    """Return the platform-appropriate default trace data directory.
+
+    POSIX keeps the historical ``~/.local/share/claude-tap`` location unchanged.
+    Windows prefers ``%LOCALAPPDATA%\\claude-tap``, but falls back to the legacy
+    POSIX-style directory when it already holds a database so existing Windows
+    users do not lose their traces after upgrading.
+    """
+    legacy = Path.home() / ".local" / "share" / "claude-tap"
+    if sys.platform == "win32":
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_appdata:
+            windows_dir = Path(local_appdata) / "claude-tap"
+            if (legacy / DB_FILENAME).exists() and not (windows_dir / DB_FILENAME).exists():
+                return legacy
+            return windows_dir
+    return legacy
+
+
 def resolve_db_path() -> Path:
     """Return the canonical local trace database path."""
     override = os.environ.get("CLOUDTAP_DB", "").strip()
@@ -44,7 +64,7 @@ def resolve_db_path() -> Path:
     if xdg_data:
         base = Path(xdg_data).expanduser() / "claude-tap"
     else:
-        base = Path.home() / ".local" / "share" / "claude-tap"
+        base = _default_data_dir()
     return (base / DB_FILENAME).resolve()
 
 
