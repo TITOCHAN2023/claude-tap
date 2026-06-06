@@ -8,7 +8,7 @@ import datetime as dt
 import re
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 REQUIRED_STANDARDS_KEYS = ("owner", "last_reviewed", "source_of_truth")
@@ -162,7 +162,11 @@ def check_architecture_manifest(repo_root: Path) -> CheckResult:
 
     for relative_path in expected_paths:
         candidate_path = Path(relative_path)
-        if candidate_path.is_absolute():
+        # Reject absolute paths under either OS convention: Path.is_absolute()
+        # alone misses POSIX-style "/foo" on Windows (no drive letter) and
+        # "C:\\foo" on POSIX, so a manifest authored on one OS is still checked
+        # consistently on the other.
+        if PurePosixPath(relative_path).is_absolute() or PureWindowsPath(relative_path).is_absolute():
             failures.append(f"{manifest_path}: expected path must be relative: {relative_path}")
             continue
 
