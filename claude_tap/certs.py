@@ -10,8 +10,10 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import logging
+import os
 import ssl
 import subprocess
+import sys
 from pathlib import Path
 
 from cryptography import x509
@@ -32,6 +34,32 @@ _HOST_VALIDITY_DAYS = 365
 
 def _generate_key() -> rsa.RSAPrivateKey:
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def _restrict_key_file(path: Path) -> None:
+    """Restrict the CA private key to the current user only.
+
+    On POSIX this is ``chmod 0o600``. On Windows ``chmod`` cannot express ACLs,
+    so use a best-effort ``icacls`` call that strips inherited permissions and
+    grants full control to the current user only. Failures degrade silently:
+    the key already lives under the user profile, which other non-admin users
+    cannot read by default.
+    """
+    if sys.platform != "win32":
+        path.chmod(0o600)
+        return
+
+    user = os.environ.get("USERNAME", "").strip()
+    if not user:
+        return
+    try:
+        subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        pass
 
 
 def ensure_ca(ca_dir: Path | None = None) -> tuple[Path, Path]:
@@ -101,7 +129,7 @@ def ensure_ca(ca_dir: Path | None = None) -> tuple[Path, Path]:
         )
     )
     # Restrict key file permissions
-    ca_key_path.chmod(0o600)
+    _restrict_key_file(ca_key_path)
 
     ca_cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
