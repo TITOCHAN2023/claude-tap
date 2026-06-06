@@ -276,6 +276,44 @@ CLIENT_CONFIGS: dict[str, ClientConfig] = {
 }
 
 
+def _install_interrupt_handlers(loop, on_sigint, on_sigtstp, sigtstp):
+    """Install SIGINT/SIGTSTP handlers for graceful child shutdown.
+
+    Prefer the asyncio loop's ``add_signal_handler``. On platforms where the
+    running loop does not implement it (the Windows ProactorEventLoop raises
+    ``NotImplementedError``), fall back to ``signal.signal`` so Ctrl+C still
+    terminates the child instead of silently no-opping. Returns a callable that
+    restores the previous handler state.
+    """
+    try:
+        loop.add_signal_handler(signal.SIGINT, on_sigint)
+        if sigtstp is not None:
+            loop.add_signal_handler(sigtstp, on_sigtstp)
+    except (NotImplementedError, OSError):
+        # Loop-based signal handling is unavailable (e.g. Windows Proactor
+        # loop). SIGTSTP does not exist on those platforms, so only SIGINT
+        # needs a fallback handler.
+        previous_sigint = signal.signal(signal.SIGINT, lambda *_: on_sigint())
+
+        def _restore_signal() -> None:
+            signal.signal(signal.SIGINT, previous_sigint)
+
+        return _restore_signal
+
+    def _restore_loop() -> None:
+        try:
+            loop.remove_signal_handler(signal.SIGINT)
+        except (NotImplementedError, OSError):
+            pass
+        if sigtstp is not None:
+            try:
+                loop.remove_signal_handler(sigtstp)
+            except (NotImplementedError, OSError):
+                pass
+
+    return _restore_loop
+
+
 async def run_client(
     port: int,
     extra_args: list[str],
@@ -450,12 +488,7 @@ async def run_client(
             proc.terminate()
             print(f"\n⏳ Shutting down {cfg.label}...")
 
-    try:
-        loop.add_signal_handler(signal.SIGINT, _handle_sigint)
-        if sigtstp is not None:
-            loop.add_signal_handler(sigtstp, _handle_sigtstp)
-    except (NotImplementedError, OSError):
-        pass
+    restore_interrupt_handlers = _install_interrupt_handlers(loop, _handle_sigint, _handle_sigtstp, sigtstp)
 
     try:
         code = await proc.wait()
@@ -477,18 +510,10 @@ async def run_client(
             pass
         signal.signal(signal.SIGTTOU, old_sigttou)
 
-    # Restore original SIGTSTP handler and remove async signal handlers
+    # Restore original SIGTSTP handler and remove the interrupt handlers.
     if sigtstp is not None and old_sigtstp is not None:
         signal.signal(sigtstp, old_sigtstp)
-    try:
-        loop.remove_signal_handler(signal.SIGINT)
-    except (NotImplementedError, OSError):
-        pass
-    if sigtstp is not None:
-        try:
-            loop.remove_signal_handler(sigtstp)
-        except (NotImplementedError, OSError):
-            pass
+    restore_interrupt_handlers()
 
     print(f"\n📋 {cfg.label} exited with code {code}")
     return code
